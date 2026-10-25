@@ -2,6 +2,7 @@ import type {
   AccountInfo,
   ModelInfo,
   Query,
+  SDKRateLimitEvent,
   SDKResultMessage,
   SlashCommand,
 } from '@anthropic-ai/claude-agent-sdk';
@@ -13,6 +14,45 @@ import type {
 } from '@cc-desk-tunnel/protocol';
 
 type ContextUsage = Awaited<ReturnType<Query['getContextUsage']>>;
+type Windows = NonNullable<Metrics['rateLimits']>['windows'];
+export type ObservedQuota = { windows: Windows; measuredAt: string };
+type UnifiedWindow = { utilization?: number; resetsAt?: number };
+
+// The CLI passes on the quota its own model requests were answered with as `rate_limit_event`. A login with
+// CLAUDE_CODE_OAUTH_TOKEN may not read the plan quota through `/usage`, but its requests carry it all the same.
+// `unifiedWindows` names every window of the response; it is not in the SDK's published type. Without it the event
+// speaks for one window. Utilization comes as a fraction and the reset as Unix seconds.
+export function observedQuota(
+  event: SDKRateLimitEvent,
+  previous: ObservedQuota | null,
+  now = Date.now(),
+): ObservedQuota | null {
+  const info = event.rate_limit_info as SDKRateLimitEvent['rate_limit_info'] & {
+    unifiedWindows?: Record<string, UnifiedWindow | undefined>;
+  };
+  const named: [string, UnifiedWindow | undefined][] = info.unifiedWindows
+    ? Object.entries(info.unifiedWindows)
+    : info.rateLimitType && info.rateLimitType !== 'overage'
+      ? [[info.rateLimitType, info]]
+      : [];
+  const windows = named.flatMap(([name, window]) =>
+    window && Number.isFinite(window.utilization)
+      ? [
+          {
+            name,
+            utilization: Math.max(0, window.utilization! * 100),
+            resetsAt: window.resetsAt ? new Date(window.resetsAt * 1000).toISOString() : null,
+          },
+        ]
+      : [],
+  );
+  if (!windows.length) return null;
+  // A window the event leaves out keeps its last reading.
+  const kept = (previous?.windows ?? []).filter(
+    (window) => !windows.some((row) => row.name === window.name),
+  );
+  return { windows: [...kept, ...windows], measuredAt: new Date(now).toISOString() };
+}
 
 export function nativeCapabilities(
   models: ModelInfo[],
@@ -135,10 +175,14 @@ export async function nativeContextRefresh(
   };
 }
 
+// `observed` is the quota last seen in the message stream, used when the CLI says the plan quota does not apply.
 export async function nativeMetrics(
   query: Query,
   result?: SDKResultMessage,
-  timeoutMs = 5000,
+  {
+    timeoutMs = 5000,
+    observed = null,
+  }: { timeoutMs?: number; observed?: ObservedQuota | null } = {},
 ): Promise<EventPayload> {
   // Order readings by when they were requested, not when concurrent status calls happened to finish.
   const measuredAt = new Date().toISOString();
@@ -167,6 +211,13 @@ export async function nativeMetrics(
         return [];
       })
     : [];
+  // A failed reading stays failed; only one that says the plan quota does not apply is completed.
+  const rateLimits =
+    usage && !usage.rate_limits_available && observed
+      ? { available: true, ...observed }
+      : usage
+        ? { available: usage.rate_limits_available, windows, measuredAt }
+        : null;
   const totals =
     result ??
     (usage?.session
@@ -179,7 +230,7 @@ export async function nativeMetrics(
     type: 'native.metrics',
     context: contextSummary(context),
     usage: totals ? resultUsage(totals) : null,
-    rateLimits: usage ? { available: usage.rate_limits_available, windows, measuredAt } : null,
+    rateLimits,
     ...(contextStatus.error || usageStatus.error
       ? {
           errors: { context: contextStatus.error, usage: usageStatus.error },
