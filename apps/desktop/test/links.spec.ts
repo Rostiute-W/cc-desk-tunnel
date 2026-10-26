@@ -111,7 +111,7 @@ test('links are followed by the conversation and pictures from the web are not f
 }) => {
   const fetched: string[] = [];
   page.on('request', (request) => {
-    if (request.url().includes('example.com')) fetched.push(request.url());
+    if (new URL(request.url()).hostname === 'example.com') fetched.push(request.url());
   });
   await open(page);
   await page.evaluate(() => {
