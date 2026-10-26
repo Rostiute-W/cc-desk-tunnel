@@ -18,6 +18,7 @@ import {
   ChevronRight,
   FilePen,
   FileText,
+  FoldVertical,
   Globe,
   Image as ImageIcon,
   LoaderCircle,
@@ -39,7 +40,7 @@ import QuestionCard, { questionsOf } from './QuestionCard.tsx';
 import { conversation } from './transcript.ts';
 import { usePrefs } from './prefs.ts';
 import { firstLine } from './transcriptView.ts';
-import type { TranscriptItem, Turn, Work } from './transcript.ts';
+import type { Compact, Notice, TranscriptItem, Turn, Work } from './transcript.ts';
 import { CopyButton, copyText } from './copy.tsx';
 import { messageTime } from './messageTime.ts';
 import TurnStats from './TurnStats.tsx';
@@ -406,6 +407,44 @@ function Message({
   );
 }
 
+// A compaction of the context, in its place among the steps: under way with its timer, then what it compacted.
+function CompactMark({ item, active, now }: { item: Compact; active: boolean; now: number }) {
+  const running = active && !item.endedAt;
+  const timed = running || (item.endedAt && item.endedAt !== item.at);
+  return (
+    <div className={`compact-mark${running ? ' running' : ''}`} role="status">
+      <span>
+        {running ? <LoaderCircle className="spinning" /> : <FoldVertical />}
+        {running
+          ? '正在压缩上下文'
+          : !item.endedAt
+            ? '上下文压缩未完成'
+            : item.trigger === 'auto'
+              ? '上下文已自动压缩'
+              : '上下文已压缩'}
+        {item.previousTokens != null && ` · 压缩前 ${item.previousTokens.toLocaleString()} tokens`}
+        {timed && ` · ${duration(item.at, item.endedAt ?? now)}`}
+      </span>
+    </div>
+  );
+}
+
+function NoticeLine({ item }: { item: Notice }) {
+  const error = item.kind === 'notice' && item.error;
+  return (
+    <div
+      className={`run-notice ${error ? 'failed' : ''}`}
+      role={error ? 'alert' : 'status'}
+      data-search-content
+    >
+      {item.text}
+    </div>
+  );
+}
+
+// How long a turn took, without the time it stood stopped before it was taken up again.
+const spent = (turn: Turn) => duration(turn.startedAt, Date.parse(turn.endedAt!) - turn.pausedMs);
+
 // A question put in while the run goes on closes the turn before it, but the run has not finished: that turn and the
 // ones joined to it stay as they were until it has.
 function heldOpen(turns: Turn[], index: number) {
@@ -430,9 +469,15 @@ function TurnView({
   const active = !turn.endedAt;
   const expanded = usePrefs().view.mode === 'expanded';
   const notes = turn.steps.filter((step) => step.kind === 'assistant').length;
+  // A turn of nothing but a compaction, as /compact makes, has nothing to fold away.
+  const folds = turn.steps.some((step) => step.kind === 'work' || step.kind === 'assistant');
   const steps = () =>
     turn.steps.map((step, index) =>
-      step.kind === 'work' ? (
+      step.kind === 'compact' ? (
+        <CompactMark key={step.id} item={step} active={active} now={live.now} />
+      ) : step.kind === 'notice' || step.kind === 'note' ? (
+        <NoticeLine key={step.id} item={step} />
+      ) : step.kind === 'work' ? (
         expanded ? (
           <div key={step.id} className="work-flat">
             <WorkItems work={step} active={active} live={live} preview />
@@ -452,21 +497,16 @@ function TurnView({
     );
   return (
     <>
-      {turn.question?.continued ? (
-        <div className="run-notice" role="status">
-          {turn.question.text}
-        </div>
-      ) : (
-        turn.question && (
-          <Message
-            item={turn.question}
-            native={native}
-            edit={turn.joined ? undefined : live.edit}
-            joined={turn.joined}
-          />
-        )
+      {/* "Continue" without the turn it takes up, which is on an earlier page, shows nothing for itself. */}
+      {turn.question && !turn.question.continued && (
+        <Message
+          item={turn.question}
+          native={native}
+          edit={turn.joined ? undefined : live.edit}
+          joined={turn.joined}
+        />
       )}
-      {active || held || expanded
+      {active || held || expanded || !folds
         ? steps()
         : turn.steps.length > 0 && (
             <Fold
@@ -475,7 +515,7 @@ function TurnView({
                 <span className={turn.outcome}>
                   {turn.outcome === 'cancelled' && '已停止 · '}
                   {turn.outcome === 'failed' && '处理失败 · '}
-                  用时 {duration(turn.startedAt, turn.endedAt!)}
+                  用时 {spent(turn)}
                   {turn.tools > 0 && ` · ${turn.tools} 步`}
                   {notes > 0 && ` · ${notes} 条说明`}
                 </span>
@@ -503,14 +543,7 @@ function TurnView({
         )
       )}
       {turn.notices.map((item) => (
-        <div
-          key={item.id}
-          className={`run-notice ${item.error ? 'failed' : ''}`}
-          role={item.error ? 'alert' : 'status'}
-          data-search-content
-        >
-          {item.text}
-        </div>
+        <NoticeLine key={item.id} item={item} />
       ))}
     </>
   );
@@ -563,10 +596,13 @@ export default function Conversation({
   progress: Record<string, TaskProgress> | undefined;
 }) {
   const turns = useMemo(() => conversation(events), [events]);
-  const toolAtWork = !!turns
-    .at(-1)
-    ?.steps.flatMap((step) => (step.kind === 'work' ? step.items : []))
-    .some((item) => item.kind === 'tool' && item.state === 'running');
+  // A compaction under way counts its time in its own line, as a tool does.
+  const steps = turns.at(-1)?.steps ?? [];
+  const toolAtWork =
+    steps.some((step) => step.kind === 'compact' && !step.endedAt) ||
+    steps
+      .flatMap((step) => (step.kind === 'work' ? step.items : []))
+      .some((item) => item.kind === 'tool' && item.state === 'running');
   // A task has been waited for since the run first listed it.
   const listedAt = (taskId: string) =>
     Date.parse(
