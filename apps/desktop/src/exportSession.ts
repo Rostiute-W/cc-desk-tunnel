@@ -28,6 +28,11 @@ export function markdown(session: Session, events: SessionEvent[]) {
   ];
   const step = (item: Step): string[] => {
     if (item.kind === 'assistant') return [item.text];
+    if (item.kind === 'notice' || item.kind === 'note') return [`> ${item.text}`];
+    if (item.kind === 'compact')
+      return [
+        `> ${item.endedAt ? '上下文已压缩' : '上下文压缩未完成'}${item.previousTokens == null ? '' : ` · 压缩前 ${item.previousTokens.toLocaleString()} tokens`}`,
+      ];
     if (item.kind !== 'work') return [];
     return item.items.map((work) =>
       work.kind === 'tool'
@@ -36,8 +41,7 @@ export function markdown(session: Session, events: SessionEvent[]) {
     );
   };
   for (const turn of conversation(events)) {
-    if (turn.question?.continued) parts.push('> 继续');
-    else if (turn.question)
+    if (turn.question && !turn.question.continued)
       parts.push(
         `## 你 · ${new Date(turn.question.at).toLocaleString('zh-CN')}`,
         turn.question.text,
