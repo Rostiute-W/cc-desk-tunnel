@@ -17,6 +17,22 @@ type ContextUsage = Awaited<ReturnType<Query['getContextUsage']>>;
 type Windows = NonNullable<Metrics['rateLimits']>['windows'];
 export type ObservedQuota = { windows: Windows; measuredAt: string };
 type UnifiedWindow = { utilization?: number; resetsAt?: number };
+// The weekly window of the models the plan counts apart. The response headers do not name the model; the CLI calls
+// it the Fable limit, and native `/usage` lists the same window under `model_scoped` as 'Fable'.
+const windowNames: Record<string, string> = { seven_day_overage_included: 'seven_day:Fable' };
+
+// Who the CLI is signed in as. A reading seen under one login says nothing about another.
+export function loginOf(account: AccountInfo) {
+  const { apiProvider, tokenSource, apiKeySource, email, organization, subscriptionType } = account;
+  return JSON.stringify([
+    apiProvider,
+    tokenSource,
+    apiKeySource,
+    email,
+    organization,
+    subscriptionType,
+  ]);
+}
 
 // The CLI passes on the quota its own model requests were answered with as `rate_limit_event`. A login with
 // CLAUDE_CODE_OAUTH_TOKEN may not read the plan quota through `/usage`, but its requests carry it all the same.
@@ -39,7 +55,7 @@ export function observedQuota(
     window && Number.isFinite(window.utilization)
       ? [
           {
-            name,
+            name: windowNames[name] ?? name,
             utilization: Math.max(0, window.utilization! * 100),
             resetsAt: window.resetsAt ? new Date(window.resetsAt * 1000).toISOString() : null,
           },
@@ -47,11 +63,20 @@ export function observedQuota(
       : [],
   );
   if (!windows.length) return null;
-  // A window the event leaves out keeps its last reading.
+  // A window the event leaves out keeps its last reading until it resets (see `unexpired`).
   const kept = (previous?.windows ?? []).filter(
     (window) => !windows.some((row) => row.name === window.name),
   );
   return { windows: [...kept, ...windows], measuredAt: new Date(now).toISOString() };
+}
+
+// A stored reading outlives its window: once the reset time passes, the figure no longer holds. The CLI drops such
+// windows from `unifiedWindows` the same way; a window without a reset time cannot be told apart and is dropped too.
+export function unexpired(observed: ObservedQuota | null, now = Date.now()): ObservedQuota | null {
+  const windows = (observed?.windows ?? []).filter(
+    (window) => window.resetsAt !== null && Date.parse(window.resetsAt) > now,
+  );
+  return windows.length ? { ...observed!, windows } : null;
 }
 
 export function nativeCapabilities(
@@ -212,9 +237,10 @@ export async function nativeMetrics(
       })
     : [];
   // A failed reading stays failed; only one that says the plan quota does not apply is completed.
+  const current = unexpired(observed, Date.parse(measuredAt));
   const rateLimits =
-    usage && !usage.rate_limits_available && observed
-      ? { available: true, ...observed }
+    usage && !usage.rate_limits_available && current
+      ? { available: true, ...current }
       : usage
         ? { available: usage.rate_limits_available, windows, measuredAt }
         : null;

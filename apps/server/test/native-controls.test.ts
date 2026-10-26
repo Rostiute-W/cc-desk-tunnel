@@ -5,7 +5,9 @@ import {
   nativeCapabilities,
   nativeContextRefresh,
   nativeMetrics,
+  loginOf,
   observedQuota,
+  unexpired,
   resultUsage,
 } from '../src/native-controls.ts';
 
@@ -365,6 +367,44 @@ test('an event for one window keeps the last reading of the others', () => {
   assert.equal(observedQuota(rateLimitEvent({ status: 'allowed' }), null), null);
 });
 
+test('the weekly window of the models counted apart takes the name native usage gives it', () => {
+  const event = rateLimitEvent({
+    status: 'allowed',
+    unifiedWindows: {
+      seven_day: { utilization: 0.44, resetsAt: 1793325600 },
+      seven_day_overage_included: { utilization: 0.6, resetsAt: 1793325600 },
+    },
+  });
+  assert.deepEqual(
+    observedQuota(event, null, 0)?.windows.map(({ name }) => name),
+    ['seven_day', 'seven_day:Fable'],
+  );
+});
+
+test('a window drops out of the reading once its reset time has passed', () => {
+  const observed = observedQuota(unified, null, 0);
+  const between = Date.parse('2026-10-27T00:00:00Z');
+  assert.deepEqual(
+    unexpired(observed, between)?.windows.map(({ name }) => name),
+    ['seven_day'],
+  );
+  assert.equal(unexpired(observed, Date.parse('2026-10-30T02:00:00Z')), null);
+  assert.equal(unexpired(null), null);
+});
+
+test('another login, an API key or a different account, is told apart from the one the reading came from', () => {
+  const token = { apiProvider: 'firstParty', tokenSource: 'CLAUDE_CODE_OAUTH_TOKEN' } as const;
+  assert.equal(loginOf(token), loginOf({ ...token }));
+  assert.notEqual(
+    loginOf(token),
+    loginOf({ apiProvider: 'firstParty', apiKeySource: 'ANTHROPIC_API_KEY' }),
+  );
+  assert.notEqual(
+    loginOf({ ...token, email: 'a@example.com' }),
+    loginOf({ ...token, email: 'b@example.com' }),
+  );
+});
+
 test('the observed quota stands in only when the CLI says the plan quota does not apply', async () => {
   const query = (available: boolean) =>
     ({
@@ -380,10 +420,31 @@ test('the observed quota stands in only when the CLI says the plan quota does no
         };
       },
     }) as unknown as Query;
-  const observed = observedQuota(unified, null, 0);
+  const later = Math.floor(Date.now() / 1000) + 3600;
+  const observed = observedQuota(
+    rateLimitEvent({
+      status: 'allowed',
+      unifiedWindows: { five_hour: { utilization: 0.02, resetsAt: later } },
+    }),
+    null,
+    0,
+  );
   const filled = await nativeMetrics(query(false), undefined, { observed });
   assert.ok(filled.type === 'native.metrics');
   assert.deepEqual(filled.rateLimits, { available: true, ...observed });
+  // A reading whose windows have all reset leaves the native answer as it is.
+  const stale = await nativeMetrics(query(false), undefined, {
+    observed: observedQuota(
+      rateLimitEvent({
+        status: 'allowed',
+        unifiedWindows: { five_hour: { utilization: 0.9, resetsAt: later - 7200 } },
+      }),
+      null,
+      0,
+    ),
+  });
+  assert.ok(stale.type === 'native.metrics');
+  assert.equal(stale.rateLimits?.available, false);
   const native = await nativeMetrics(query(true), undefined, { observed });
   assert.ok(native.type === 'native.metrics');
   assert.deepEqual(native.rateLimits?.windows, [

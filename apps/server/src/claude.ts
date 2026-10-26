@@ -1,7 +1,7 @@
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { query, getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
-import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { AccountInfo, Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type {
   DevicePlatform,
   Effort,
@@ -13,6 +13,7 @@ import { deviceTerms } from './device-terms.ts';
 import { ClaudeStream } from './claude-stream.ts';
 import type { SshConnection } from './tunnel.ts';
 import {
+  loginOf,
   nativeCapabilities,
   nativeContextRefresh,
   nativeMetrics,
@@ -83,6 +84,13 @@ export type ClaudeRun = {
 // The plan quota the CLI last passed on in its message stream. One account serves every session, so the reading of
 // any of them stands for all, and a session that has not made a request yet shows the last one known.
 let observed: ObservedQuota | null = null;
+let observedLogin: string | undefined;
+// Signing in as someone else, or with an API key, leaves the last reading behind.
+function signedIn(account: AccountInfo) {
+  const login = loginOf(account);
+  if (login !== observedLogin) observed = null;
+  observedLogin = login;
+}
 // `sessionId` is the proxy's name for the session, which a scheduled task needs to continue it.
 export function remotePrompt(
   projectPath: string,
@@ -226,6 +234,7 @@ export async function runClaude(
       },
     });
     const initialized = await session.initializationResult();
+    signedIn(initialized.account);
     // The commands change while the run goes on: each turn's `init` names those bound to the CLI's terminal, and
     // skills found on the way bring a new list. A change is passed on once.
     let commands = initialized.commands;
@@ -491,6 +500,7 @@ export async function readNativeStatus(
       }
     })().catch(() => {});
     const initialized = await process.initializationResult();
+    signedIn(initialized.account);
     return [
       nativeCapabilities(
         initialized.models,
