@@ -1532,6 +1532,7 @@ export function App({
             <Conversation
               findRequest={findRequest}
               session={selected}
+              here={!!selected && onThis(selected)}
               events={events}
               history={history}
               connected={connected}
