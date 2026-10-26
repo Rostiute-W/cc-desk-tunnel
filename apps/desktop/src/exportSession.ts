@@ -2,12 +2,21 @@ import type { Session, SessionEvent } from '@cc-desk-tunnel/protocol';
 import type { ProxyClient } from './client.ts';
 import { conversation } from './transcript.ts';
 import type { Step } from './transcript.ts';
+import { pictureNote, toolPictures } from './pictures.ts';
 
 // A fence longer than any run of backticks inside, so the content cannot close it early.
 function fenced(text: string) {
   const longest = Math.max(2, ...[...text.matchAll(/`+/g)].map((match) => match[0].length));
   const fence = '`'.repeat(longest + 1);
   return `${fence}\n${text}\n${fence}`;
+}
+
+// A picture a tool looked at is named by its type and size, not written out as its data.
+function toolOutput(output: string) {
+  const pictures = toolPictures(output);
+  return pictures
+    ? [pictures.text, ...pictures.pictures.map(pictureNote)].filter(Boolean).join('\n')
+    : output;
 }
 
 // The whole session as one Markdown document: questions, answers, and under each answer what was done to
@@ -22,7 +31,7 @@ export function markdown(session: Session, events: SessionEvent[]) {
     if (item.kind !== 'work') return [];
     return item.items.map((work) =>
       work.kind === 'tool'
-        ? `<details>\n<summary>工具 ${work.name} · ${work.status}</summary>\n\n${fenced(work.input)}\n\n${work.output ? fenced(work.output) : ''}\n</details>`
+        ? `<details>\n<summary>工具 ${work.name} · ${work.status}</summary>\n\n${fenced(work.input)}\n\n${work.output ? fenced(toolOutput(work.output)) : ''}\n</details>`
         : `<details>\n<summary>思考</summary>\n\n${work.text}\n</details>`,
     );
   };
