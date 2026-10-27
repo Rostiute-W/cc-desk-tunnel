@@ -16,10 +16,10 @@ import type {
 type ContextUsage = Awaited<ReturnType<Query['getContextUsage']>>;
 type Windows = NonNullable<Metrics['rateLimits']>['windows'];
 export type ObservedQuota = { windows: Windows; measuredAt: string };
+// `seven_day_overage_included` is the weekly window of the models the plan counts apart. The response headers do not
+// say which models those are, so it keeps its own name rather than one guessed after native `/usage`, which names the
+// same window after the model the server calls it by.
 type UnifiedWindow = { utilization?: number; resetsAt?: number };
-// The weekly window of the models the plan counts apart. The response headers do not name the model; the CLI calls
-// it the Fable limit, and native `/usage` lists the same window under `model_scoped` as 'Fable'.
-const windowNames: Record<string, string> = { seven_day_overage_included: 'seven_day:Fable' };
 
 // Who the CLI is signed in as. A reading seen under one login says nothing about another.
 export function loginOf(account: AccountInfo) {
@@ -55,7 +55,7 @@ export function observedQuota(
     window && Number.isFinite(window.utilization)
       ? [
           {
-            name: windowNames[name] ?? name,
+            name,
             utilization: Math.max(0, window.utilization! * 100),
             resetsAt: window.resetsAt ? new Date(window.resetsAt * 1000).toISOString() : null,
           },
@@ -68,6 +68,20 @@ export function observedQuota(
     (window) => !windows.some((row) => row.name === window.name),
   );
   return { windows: [...kept, ...windows], measuredAt: new Date(now).toISOString() };
+}
+
+// The quota last seen in the message stream, kept by the login it came under (see `loginOf`). A project whose
+// settings sign in otherwise (an API key, another token) keeps apart, and a run still going under a login since
+// replaced writes to its own, not to the new one's.
+export class ObservedQuotas {
+  private readings = new Map<string, ObservedQuota>();
+  of(login: string) {
+    return this.readings.get(login) ?? null;
+  }
+  observe(login: string, event: SDKRateLimitEvent, now = Date.now()) {
+    const reading = observedQuota(event, this.of(login), now);
+    if (reading) this.readings.set(login, reading);
+  }
 }
 
 // A stored reading outlives its window: once the reset time passes, the figure no longer holds. The CLI drops such

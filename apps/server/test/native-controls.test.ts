@@ -7,6 +7,7 @@ import {
   nativeMetrics,
   loginOf,
   observedQuota,
+  ObservedQuotas,
   unexpired,
   resultUsage,
 } from '../src/native-controls.ts';
@@ -367,7 +368,7 @@ test('an event for one window keeps the last reading of the others', () => {
   assert.equal(observedQuota(rateLimitEvent({ status: 'allowed' }), null), null);
 });
 
-test('the weekly window of the models counted apart takes the name native usage gives it', () => {
+test('the weekly window of the models counted apart keeps its own name, since the replies do not name the models', () => {
   const event = rateLimitEvent({
     status: 'allowed',
     unifiedWindows: {
@@ -377,8 +378,34 @@ test('the weekly window of the models counted apart takes the name native usage 
   });
   assert.deepEqual(
     observedQuota(event, null, 0)?.windows.map(({ name }) => name),
-    ['seven_day', 'seven_day:Fable'],
+    ['seven_day', 'seven_day_overage_included'],
   );
+});
+
+test('readings are kept by login: another one neither sees nor overwrites them', () => {
+  const quotas = new ObservedQuotas();
+  quotas.observe('token', unified, 0);
+  assert.equal(quotas.of('api key'), null);
+  // A run left under an earlier login goes on reporting; the reading of the one signed in now stands.
+  quotas.observe(
+    'earlier',
+    rateLimitEvent({
+      status: 'allowed',
+      unifiedWindows: { seven_day: { utilization: 0.9, resetsAt: 1793325600 } },
+    }),
+    1,
+  );
+  assert.deepEqual(
+    quotas.of('token')?.windows.map(({ name, utilization }) => [name, utilization]),
+    [
+      ['five_hour', 2],
+      ['seven_day', 44],
+    ],
+  );
+  assert.equal(quotas.of('earlier')?.windows[0]?.utilization, 90);
+  // An event that says nothing of the windows leaves the reading as it was.
+  quotas.observe('token', rateLimitEvent({ status: 'allowed', rateLimitType: 'overage' }), 2);
+  assert.equal(quotas.of('token')?.measuredAt, new Date(0).toISOString());
 });
 
 test('a window drops out of the reading once its reset time has passed', () => {
