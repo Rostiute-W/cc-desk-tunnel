@@ -72,7 +72,11 @@ export type ClaudeRun = {
   }) => void;
   // Filled in while the CLI is running, so the service can ask it for fresh account quota mid-run and end
   // one of its background tasks.
-  controls: { refresh?: () => Promise<void>; stopTask?: (taskId: string) => Promise<void> };
+  controls: {
+    refresh?: () => Promise<void>;
+    stopTask?: (taskId: string) => Promise<void>;
+    backgroundTask?: (toolId: string) => Promise<boolean>;
+  };
 };
 // `sessionId` is the proxy's name for the session, which a scheduled task needs to continue it.
 export function remotePrompt(
@@ -243,6 +247,7 @@ export async function runClaude(
     let quotaAt = Date.now();
     const running = session;
     run.controls.stopTask = (taskId) => running.stopTask(taskId);
+    run.controls.backgroundTask = (toolId) => running.backgroundTasks(toolId);
     run.controls.refresh = async () => {
       const payload = await nativeMetrics(running);
       if (payload.type === 'native.metrics') metrics = payload;
@@ -397,6 +402,7 @@ export async function runClaude(
     clearTimeout(settle);
     run.controls.refresh = undefined;
     run.controls.stopTask = undefined;
+    run.controls.backgroundTask = undefined;
     run.input.close();
     session?.close();
     run.signal.removeEventListener('abort', stop);

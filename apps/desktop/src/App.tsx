@@ -1562,6 +1562,16 @@ export function App({
                   });
                 });
               }}
+              backgroundTask={(toolId) => {
+                void act(async () => {
+                  await client.request({
+                    type: 'run.task.background',
+                    sessionId: selected!.id,
+                    runId: selected!.activeRun!.id,
+                    toolId,
+                  });
+                });
+              }}
               stop={stopRun}
               replyApproval={async (runId, approvalId, allowed, answers) => {
                 let sent = false;
